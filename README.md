@@ -6,8 +6,7 @@
 ของเบราว์เซอร์ ไม่มี server/backend ของตัวเอง) ติดตั้งเป็น PWA บนมือถือได้ ใช้งาน offline ได้
 
 ## Tech Stack
-Vite + ES Modules · IndexedDB · Tailwind CSS (CDN) · Lucide Icons · Chart.js — ดีไซน์ตามมาตรฐาน
-**"Tactile Plant UI"** ของแบรนด์ Supasit.A (ดู `vibe-coding-core` skill สำหรับรายละเอียดเต็ม)
+Vite + ES Modules · IndexedDB (Local-First) · Firebase Auth & Firestore (Real-Time Cloud Sync) · Tailwind CSS · Lucide Icons · Chart.js — ดีไซน์ตามสไตล์ **"Tactile Neumorphism UI"** ของ Supasit.A Studio
 
 ## Local Development
 ```bash

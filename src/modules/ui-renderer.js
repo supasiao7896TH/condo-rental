@@ -431,10 +431,52 @@ function renderReminders({ rooms, transactions, month }) {
   `;
 }
 
-function renderSettings({ rooms, transactions }) {
+function renderSettings({ rooms, transactions, user, syncStatus }) {
   const shareUrl = typeof window !== 'undefined' ? window.location.origin : '';
+
+  const syncBadge = {
+    idle: '<span class="text-xs text-slate-400 font-medium">ยังไม่เปิดซิงก์</span>',
+    syncing: '<span class="text-xs text-amber-500 font-bold animate-pulse">กำลังซิงก์...</span>',
+    synced: '<span class="text-xs text-emerald-600 dark:text-emerald-400 font-bold">ซิงก์คลาวด์แล้ว</span>',
+    error: '<span class="text-xs text-rose-500 font-bold">ซิงก์ขัดข้อง</span>',
+  }[syncStatus || 'idle'] || '<span class="text-xs text-slate-400 font-medium">พร้อมใช้งาน</span>';
+
+  const accountHtml = user ? `
+    <div class="tactile p-4 mb-4">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-bold flex items-center gap-1.5">${icon('cloud', 'w-4 h-4 text-brand-500')} บัญชีและคลาวด์ซิงก์</h3>
+        ${syncBadge}
+      </div>
+      <div class="flex items-center gap-3 p-3 tactile-inset rounded-xl mb-3">
+        ${user.photoURL ? `<img src="${escapeHtml(user.photoURL)}" alt="Avatar" class="w-10 h-10 rounded-full" />` : `<div class="w-10 h-10 rounded-full bg-brand-500/20 flex items-center justify-center text-brand-600 font-bold">${escapeHtml((user.displayName || user.email || 'U')[0].toUpperCase())}</div>`}
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-bold truncate">${escapeHtml(user.displayName || 'ผู้ใช้งานคอนโด')}</p>
+          <p class="text-xs text-[var(--text-secondary)] truncate">${escapeHtml(user.email || '')}</p>
+        </div>
+      </div>
+      <div class="flex gap-2">
+        <button type="button" data-action="sync-now" class="tactile-btn flex-1 py-2 text-sm font-bold text-brand-600 flex items-center justify-center gap-1.5">${icon('refresh-cw', 'w-4 h-4')} ซิงก์ทันที</button>
+        <button type="button" data-action="auth-logout" class="tactile-btn px-4 py-2 text-sm font-bold text-red-500 flex items-center justify-center gap-1.5">${icon('log-out', 'w-4 h-4')} ออกจากระบบ</button>
+      </div>
+    </div>
+  ` : `
+    <div class="tactile p-4 mb-4">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-bold flex items-center gap-1.5">${icon('cloud', 'w-4 h-4 text-brand-500')} ซิงก์ข้อมูลข้ามอุปกรณ์ (Cloud Sync)</h3>
+        <span class="text-xs text-slate-400">Offline-first</span>
+      </div>
+      <p class="text-xs text-[var(--text-secondary)] mb-3">ล็อกอินเพื่อให้ข้อมูลคอนโดซิงก์ตรงกันระหว่างคอมพิวเตอร์และมือถืออัตโนมัติ (ยังคงเก็บสำรองในเครื่องด้วย IndexedDB เสมอ)</p>
+      <div class="flex flex-col sm:flex-row gap-2">
+        <button type="button" data-action="auth-login-google" class="tactile-btn flex-1 py-2 text-sm font-bold text-brand-600 flex items-center justify-center gap-1.5">${icon('log-in', 'w-4 h-4')} เข้าสู่ระบบด้วย Google</button>
+        <button type="button" data-action="auth-login-email-modal" class="tactile-btn flex-1 py-2 text-sm font-medium text-[var(--text-secondary)] flex items-center justify-center gap-1.5">${icon('mail', 'w-4 h-4')} เข้าสู่ระบบด้วย Email</button>
+      </div>
+    </div>
+  `;
+
   return `
     <h2 class="text-lg font-bold mb-4">ตั้งค่าระบบ</h2>
+
+    ${accountHtml}
 
     <div class="tactile p-4 mb-4">
       <h3 class="text-sm font-bold mb-2 flex items-center gap-1.5">${icon('share-2', 'w-4 h-4 text-brand-500')} ลิงก์ใช้งาน / ติดตั้งเป็นแอป</h3>
@@ -995,6 +1037,34 @@ export const UIRenderer = {
     if (!printArea) return;
     printArea.innerHTML = taxReportPrintHtml(rooms, transactions, year);
     window.print();
+  },
+
+  openAuthModal() {
+    this.openModal(`
+      <div class="space-y-4">
+        <div class="flex justify-between items-center pb-2 border-b border-black/5 dark:border-white/5">
+          <h3 class="text-base font-bold" id="authModalTitle">เข้าสู่ระบบด้วย Email</h3>
+          <button type="button" data-action="close-modal" class="text-slate-400 hover:text-slate-600 p-1">${icon('x', 'w-5 h-5')}</button>
+        </div>
+        <form id="emailAuthForm" class="space-y-3">
+          <input type="hidden" name="mode" id="authModeInput" value="login" />
+          <div>
+            <label class="block text-xs font-bold text-[var(--text-secondary)] mb-1">Email</label>
+            <input type="email" name="email" required placeholder="name@example.com" class="${INPUT_CLASS}" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-[var(--text-secondary)] mb-1">รหัสผ่าน (Password)</label>
+            <input type="password" name="password" required minlength="6" placeholder="อย่างน้อย 6 ตัวอักษร" class="${INPUT_CLASS}" />
+          </div>
+          <div class="pt-2">
+            <button type="submit" id="authSubmitBtn" class="tactile-btn w-full py-2.5 font-bold text-brand-600 flex items-center justify-center gap-1.5">${icon('log-in', 'w-4 h-4')} เข้าสู่ระบบ</button>
+          </div>
+        </form>
+        <div class="text-center pt-2">
+          <button type="button" data-action="toggle-auth-mode" class="text-xs text-brand-600 font-medium hover:underline" id="toggleAuthModeBtn">ยังไม่มีบัญชี? กดสมัครสมาชิกใหม่ที่นี่</button>
+        </div>
+      </div>
+    `);
   },
 
   openModal(contentHtml) {

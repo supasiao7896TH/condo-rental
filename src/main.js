@@ -5,6 +5,8 @@ import { StateStore } from './modules/state-store.js';
 import { DebugModule } from './modules/debug-module.js';
 import { UIRenderer, currentMonthStr, formatCurrency, shiftMonth } from './modules/ui-renderer.js';
 import { upsertMonthlyPayment } from './modules/payment-actions.js';
+import { AuthProvider } from './modules/auth-provider.js';
+import { CloudSyncManager } from './modules/cloud-sync-manager.js';
 
 function rerenderCurrentView() {
   const view = StateStore.get('currentView') ?? 'dashboard';
@@ -19,8 +21,26 @@ function rerenderCurrentView() {
     transactions: StateStore.get('transactions') ?? [],
     month,
     txFilter: StateStore.get('txFilter') ?? { query: '', type: 'all' },
+    user: StateStore.get('currentUser') ?? null,
+    syncStatus: CloudSyncManager.getStatus(),
   });
   UIRenderer.setActiveNav(view);
+}
+
+// Helpers สำหรับบันทึกข้อมูลแบบ Local-first พร้อมซิงก์ขึ้น Firestore อัตโนมัติ
+async function saveRoomWithSync(room) {
+  await StorageEngine.put(AppConfig.STORES.ROOMS, room);
+  CloudSyncManager.syncItem(AppConfig.STORES.ROOMS, room).catch((e) => DebugModule.log('warn', 'saveRoomWithSync', e));
+}
+
+async function saveTxWithSync(tx) {
+  await StorageEngine.put(AppConfig.STORES.TRANSACTIONS, tx);
+  CloudSyncManager.syncItem(AppConfig.STORES.TRANSACTIONS, tx).catch((e) => DebugModule.log('warn', 'saveTxWithSync', e));
+}
+
+async function deleteTxWithSync(id) {
+  await StorageEngine.delete(AppConfig.STORES.TRANSACTIONS, id);
+  CloudSyncManager.deleteItem(AppConfig.STORES.TRANSACTIONS, id).catch((e) => DebugModule.log('warn', 'deleteTxWithSync', e));
 }
 
 async function seedDefaultRoomsIfEmpty() {
@@ -57,7 +77,11 @@ async function deleteRoomCascade(id) {
     StorageEngine.getByIndex(AppConfig.STORES.DOCUMENTS, 'roomId', id),
   ]);
   await StorageEngine.delete(AppConfig.STORES.ROOMS, id);
-  for (const tx of txs) await StorageEngine.delete(AppConfig.STORES.TRANSACTIONS, tx.id);
+  CloudSyncManager.deleteItem(AppConfig.STORES.ROOMS, id).catch(() => {});
+  for (const tx of txs) {
+    await StorageEngine.delete(AppConfig.STORES.TRANSACTIONS, tx.id);
+    CloudSyncManager.deleteItem(AppConfig.STORES.TRANSACTIONS, tx.id).catch(() => {});
+  }
   for (const doc of docs) await StorageEngine.delete(AppConfig.STORES.DOCUMENTS, doc.id);
 }
 
@@ -94,6 +118,24 @@ async function init() {
     StateStore.on('currentView', rerenderCurrentView);
     StateStore.on('txFilter', rerenderCurrentView);
     StateStore.on('dashboardMonth', rerenderCurrentView);
+
+    // ซิงก์สถานะ Cloud Sync กับ UI
+    CloudSyncManager.onStatusChange(() => {
+      rerenderCurrentView();
+    });
+
+    // ตรวจสอบสถานะการเข้าสู่ระบบ และเริ่มซิงก์ข้อมูลอัตโนมัติ
+    AuthProvider.subscribe(async (user) => {
+      StateStore.set('currentUser', user);
+      if (user) {
+        await CloudSyncManager.startSync(user.uid);
+      } else {
+        CloudSyncManager.stopSync();
+      }
+      rerenderCurrentView();
+    });
+
+    await AuthProvider.init();
 
     rerenderCurrentView();
   } catch (err) {
@@ -194,7 +236,7 @@ async function handleAction(action, trigger) {
           month: currentMonth,
           amount: room.loanMonthlyPayment,
         });
-        await StorageEngine.put(AppConfig.STORES.TRANSACTIONS, record);
+        await saveTxWithSync(record);
         StateStore.set('transactions', nextTransactions);
         UIRenderer.closeModal();
         UIRenderer.showToast('บันทึกจ่ายค่างวดแล้วค่ะ', 'success');
@@ -228,7 +270,7 @@ async function handleAction(action, trigger) {
           month: currentMonth,
           amount: room.rentAmount,
         });
-        await StorageEngine.put(AppConfig.STORES.TRANSACTIONS, record);
+        await saveTxWithSync(record);
         StateStore.set('transactions', nextTransactions);
         UIRenderer.closeModal();
         UIRenderer.showToast('บันทึกรับค่าเช่าแล้วค่ะ', 'success');
@@ -375,7 +417,7 @@ async function handleAction(action, trigger) {
 
     case 'confirm-delete-transaction':
       try {
-        await StorageEngine.delete(AppConfig.STORES.TRANSACTIONS, trigger.dataset.id);
+        await deleteTxWithSync(trigger.dataset.id);
         StateStore.set('transactions', transactions.filter((t) => t.id !== trigger.dataset.id));
         UIRenderer.closeModal();
         UIRenderer.showToast('ลบธุรกรรมแล้วค่ะ', 'success');
@@ -384,6 +426,60 @@ async function handleAction(action, trigger) {
         UIRenderer.showToast('ลบไม่สำเร็จ', 'error');
       }
       break;
+
+    case 'auth-login-google':
+      try {
+        await AuthProvider.loginWithGoogle();
+        UIRenderer.showToast('เข้าสู่ระบบสำเร็จค่ะ', 'success');
+      } catch (err) {
+        DebugModule.log('error', 'loginWithGoogle', err);
+        UIRenderer.showToast('เข้าสู่ระบบไม่สำเร็จ: ' + (err.message || 'โปรดลองใหม่'), 'error');
+      }
+      break;
+
+    case 'auth-login-email-modal':
+      UIRenderer.openAuthModal();
+      break;
+
+    case 'toggle-auth-mode': {
+      const modeInput = document.getElementById('authModeInput');
+      const title = document.getElementById('authModalTitle');
+      const submitBtn = document.getElementById('authSubmitBtn');
+      const toggleBtn = document.getElementById('toggleAuthModeBtn');
+      if (!modeInput) break;
+      const isLogin = modeInput.value === 'login';
+      modeInput.value = isLogin ? 'register' : 'login';
+      title.textContent = isLogin ? 'สมัครสมาชิกใหม่' : 'เข้าสู่ระบบด้วย Email';
+      submitBtn.innerHTML = isLogin ? 'สมัครสมาชิก' : 'เข้าสู่ระบบ';
+      toggleBtn.textContent = isLogin ? 'มีบัญชีอยู่แล้ว? เข้าสู่ระบบที่นี่' : 'ยังไม่มีบัญชี? กดสมัครสมาชิกใหม่ที่นี่';
+      break;
+    }
+
+    case 'auth-logout':
+      try {
+        await AuthProvider.logout();
+        UIRenderer.showToast('ออกจากระบบแล้วค่ะ', 'info');
+      } catch (err) {
+        DebugModule.log('error', 'logout', err);
+        UIRenderer.showToast('ออกจากระบบไม่สำเร็จ', 'error');
+      }
+      break;
+
+    case 'sync-now': {
+      const user = AuthProvider.getCurrentUser();
+      if (!user) {
+        UIRenderer.showToast('กรุณาเข้าสู่ระบบก่อนซิงก์ข้อมูลค่ะ', 'info');
+        break;
+      }
+      try {
+        UIRenderer.showToast('กำลังซิงก์ข้อมูลกับ Cloud...', 'info');
+        await CloudSyncManager.startSync(user.uid);
+        UIRenderer.showToast('ซิงก์ข้อมูลกับ Cloud เรียบร้อยแล้วค่ะ', 'success');
+      } catch (err) {
+        UIRenderer.showToast('ซิงก์ข้อมูลไม่สำเร็จ', 'error');
+      }
+      break;
+    }
   }
 }
 
@@ -558,7 +654,7 @@ document.addEventListener('submit', async (e) => {
     };
 
     try {
-      await StorageEngine.put(AppConfig.STORES.ROOMS, updated);
+      await saveRoomWithSync(updated);
       const nextRooms = existing ? rooms.map((r) => (r.id === id ? updated : r)) : [...rooms, updated];
       StateStore.set('rooms', nextRooms);
       UIRenderer.closeModal();
@@ -605,7 +701,7 @@ document.addEventListener('submit', async (e) => {
     };
 
     try {
-      await StorageEngine.put(AppConfig.STORES.ROOMS, updated);
+      await saveRoomWithSync(updated);
       StateStore.set('rooms', rooms.map((r) => (r.id === id ? updated : r)));
       UIRenderer.closeModal();
       UIRenderer.showToast('บันทึกย้ายออกแล้วค่ะ — ห้องว่างแล้ว', 'success');
@@ -634,7 +730,7 @@ document.addEventListener('submit', async (e) => {
     };
 
     try {
-      await StorageEngine.put(AppConfig.STORES.TRANSACTIONS, record);
+      await saveTxWithSync(record);
       const exists = transactions.some((t) => t.id === id);
       const nextList = exists
         ? transactions.map((t) => (t.id === id ? record : t))
@@ -647,6 +743,33 @@ document.addEventListener('submit', async (e) => {
       DebugModule.log('error', 'main.transactionForm submit', err);
       UIRenderer.showToast('บันทึกไม่สำเร็จ', 'error');
     }
+    return;
+  }
+
+  if (e.target.id === 'emailAuthForm') {
+    const form = e.target;
+    const mode = form.mode.value;
+    const email = form.email.value.trim();
+    const password = form.password.value;
+
+    try {
+      if (mode === 'register') {
+        await AuthProvider.registerWithEmail(email, password);
+        UIRenderer.showToast('สมัครสมาชิกและเข้าสู่ระบบสำเร็จค่ะ', 'success');
+      } else {
+        await AuthProvider.loginWithEmail(email, password);
+        UIRenderer.showToast('เข้าสู่ระบบสำเร็จค่ะ', 'success');
+      }
+      UIRenderer.closeModal();
+    } catch (err) {
+      DebugModule.log('error', 'emailAuthForm submit', err);
+      const msg = err.code === 'auth/email-already-in-use' ? 'อีเมลนี้ถูกใช้งานแล้วค่ะ'
+        : err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential' ? 'อีเมลหรือรหัสผ่านไม่ถูกต้องค่ะ'
+        : err.code === 'auth/weak-password' ? 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษรค่ะ'
+        : (err.message || 'เกิดข้อผิดพลาดในการเข้าสู่ระบบ');
+      UIRenderer.showToast(msg, 'error');
+    }
+    return;
   }
 });
 
